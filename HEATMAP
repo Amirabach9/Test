@@ -1,0 +1,103 @@
+library(GEOquery)
+library(limma)
+
+gse <- getGEO("GSE73622", GSEMatrix = TRUE, AnnotGPL = TRUE)
+gse_data <- gse[[1]]
+exprs_data <- exprs(gse_data)
+pheno_data <- pData(gse_data)
+feature_data <- fData(gse_data)
+
+write.csv(exprs_data, "~/HYRS_bioinfo/GSE73622/GSE73622_expression_matrix.csv")
+write.csv(pheno_data, "~/HYRS_bioinfo/GSE73622/GSE73622_sample_metadata.csv")
+write.csv(feature_data, "~/HYRS_bioinfo/GSE73622/GSE73622_probe_annotation.csv")
+
+
+
+# Remove probes with too many NAs or zero variance
+exprs_data <- exprs_data[complete.cases(exprs_data), ]
+exprs_data <- exprs_data[apply(exprs_data, 1, var) > 0.01, ]# change threshold as needed
+
+#finding column NaN
+#exprs_data <- log2(exprs_data + 1)
+sum(is.nan(exprs_data))
+rownames(exprs_data)
+colSums(is.na(exprs_data))
+dim(exprs_data)
+head(exprs_data)
+# fill column NaN with median 
+exprs_data[is.nan(exprs_data)] <- NA
+
+exprs_data <- apply(exprs_data, 2, function(x) {
+  x[is.na(x)] <- median(x, na.rm = TRUE)
+  x
+})
+feature_data <- feature_data[rownames(exprs_data), ]
+head(rownames(feature_data))
+head(rownames(exprs_data))
+# Ensure annotation includes gene symbols
+feature_data <- fData(gse_data)
+colnames(feature_data)
+head(feature_data$`Gene symbol`)  # Confirm it has gene symbols
+
+# Combine expression data and annotation
+exprs_annotated <- data.frame(probe_id = rownames(exprs_data),
+                              exprs_data,
+                              stringsAsFactors = FALSE)
+
+# Add gene symbols
+exprs_annotated$gene_symbol <- feature_data[rownames(exprs_data), "Gene symbol"]
+exprs_annotated$gene_symbol <- sapply(strsplit(exprs_annotated$gene_symbol, "///", fixed = TRUE), `[`, 1)
+
+write.csv(exprs_annotated, "~/HYRS_bioinfo/GSE73622/GSE73622_Exprs_annotated.csv")
+colnames(exprs_annotated)
+
+dim(exprs_annotated)
+
+exprs_matrix <- exprs_annotated
+dim(exprs_matrix)
+
+table(pheno_data$`disease:ch1`)
+group <- factor(pheno_data$`disease:ch1`)
+colnames(exprs_matrix)
+rownames(pheno_data)
+pheno_data <- pheno_data[colnames(exprs_matrix), ]
+
+design <- model.matrix(~0 + group)
+colnames(design) <- make.names(colnames(design))
+contrast.matrix <- makeContrasts(
+  Endometriosis_vs_Control = groupEndometriosis - groupNo.Endometriosis,
+  levels = design
+)
+
+fit <- lmFit(exprs_data, design)
+fit2 <- contrasts.fit(fit, contrast.matrix)
+fit2 <- eBayes(fit2)
+
+results <- topTable(fit2, adjust = "fdr", number = Inf)
+dim(results)
+###### plot  --- here is the code 
+
+library(EnhancedVolcano)
+library(ggplot2)
+
+# --- Fix: annotate by probe_id (results has no gene_symbol yet) ---
+results$probe_id <- rownames(results)
+results_annotated <- merge(
+  results,
+  exprs_annotated[, c("probe_id", "gene_symbol")],
+  by = "probe_id", all.x = TRUE
+)
+
+# --- Thresholds (keep coloring and the dashed cutoff lines consistent) ---
+logFC_threshold <- 0.1
+adjP_threshold  <- 0.05
+
+# --- Classify direction ---
+results_annotated$Regulation <- ifelse(
+  results_annotated$adj.P.Val < adjP_threshold & results_annotated$logFC >  logFC_threshold, "Upregulated",
+  ifelse(results_annotated$adj.P.Val < adjP_threshold & results_annotated$logFC < -logFC_threshold, "Downregulated",
+         "Not Significant"))
+print(table(results_annotated$Regulation))
+
+library(pheatmap)
+pheatmap(exprs_annotated)
